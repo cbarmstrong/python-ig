@@ -1,14 +1,12 @@
-#!/usr/bin/python
+#!/usr/bin/python3.6
 
-import cmd2
 from ftse_data import FtseData
 import datetime
 import ig_data
 import json
+import sys
 
-class stocks(cmd2.Cmd):
-    intro = "\n\nStock learning app\n\n"
-
+class stocks():
 
     ftse_data = FtseData()
     ftse = ftse_data.get_ftse()
@@ -17,7 +15,7 @@ class stocks(cmd2.Cmd):
     current_date = datetime.date.today().strftime("%Y-%m-%d")
     view = ftse_data.get_constituents_on(current_date, ftse.copy(), ftse_changes)
 
-    prompt = "{}>>".format(current_date)
+    prompt = f"{current_date} >>"
     epics = ig_data.get_epics(view)
 
     def do_print_current_list(self,line):
@@ -27,7 +25,7 @@ class stocks(cmd2.Cmd):
         try:
             stop_date=datetime.datetime.strptime(line,"%Y-%m-%d")
         except:
-            print("Provided date string not parseable: {}".format(line))
+            print(f"Provided date string not parseable: {line}")
             return
 
         cur_date = ig_data.from_ymd(ig_data.to_ymd(datetime.datetime.today()))
@@ -36,7 +34,7 @@ class stocks(cmd2.Cmd):
             epics = ig_data.get_epics(view)
             for e, epic in self.epics.items():
                 ig_data.pull_prices(cur_date, epic)
-            cur_date-=datetime.timedelta(days=1)
+            cur_date-=datetime.timedelta(days=50)
 
     def do_clean_data(self,line):
         for e,epic in self.epics.items():
@@ -45,5 +43,4 @@ class stocks(cmd2.Cmd):
 
 if __name__ == '__main__':
     s = stocks()
-    s.debug=True
-    s.cmdloop()
+    s.do_pull_prices_to_date(sys.argv[1])

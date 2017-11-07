@@ -1,10 +1,11 @@
-from __future__ import print_function
 import datetime
 import PyPDF2
 import re
-import urllib2
+import urllib3
 
 class FtseData:
+
+    http = urllib3.PoolManager()
 
     def add_new_line(self,match):
         return "\n" + match.group(0)
@@ -26,9 +27,9 @@ class FtseData:
 
         ftse100_file = '/tmp/ftse100.pdf'
         f = open(ftse100_file, 'wb')
-        response = urllib2.urlopen(
+        response = self.http.request('GET',
             'http://www.ftse.com/analytics/factsheets/Home/DownloadConstituentsWeights/?indexdetails=UKX')
-        f.write(response.read())
+        f.write(response.data)
         f.close()
         f = open(ftse100_file, 'rb')
         r = PyPDF2.PdfFileReader(f)
@@ -101,8 +102,8 @@ class FtseData:
 
         add_del_file = '/tmp/ftse_adds_and_deletes.pdf'
         f = open(add_del_file, 'wb')
-        response = urllib2.urlopen('http://www.ftse.com/products/downloads/FTSE_100_Constituent_history.pdf')
-        f.write(response.read())
+        response = self.http.request('GET','http://www.ftse.com/products/downloads/FTSE_100_Constituent_history.pdf')
+        f.write(response.data)
         f.close()
         f = open(add_del_file, 'rb')
         r = PyPDF2.PdfFileReader(f)
@@ -143,7 +144,7 @@ class FtseData:
         print("Attempting to extract stock identification")
 
         ftse_changes = {}
-        dates = change_dates.keys()
+        dates = list(change_dates.keys())
         dates.sort(reverse=True)
         ftse = ftse.copy()
 
@@ -155,7 +156,7 @@ class FtseData:
 
                 #            print(" - {}".format(stock_change))
                 matched = False
-                stocks = ftse.keys()
+                stocks = list(ftse.keys())
                 stocks.sort()
 
                 for stock in stocks:
@@ -222,7 +223,7 @@ class FtseData:
 
     def get_constituents_on(self,target_date, ftse, ftse_changes):
         target_date = datetime.datetime.strptime(target_date, '%Y-%m-%d')
-        dates = ftse_changes.keys()
+        dates = list(ftse_changes.keys())
         dates.sort(reverse=True)
         for date in dates:
             if date < target_date:

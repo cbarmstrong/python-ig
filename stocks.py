@@ -11,6 +11,9 @@ class stocks():
     ftse_data = FtseData()
     ftse = ftse_data.get_ftse()
     change_dates = ftse_data.get_ftse_changes()
+    from pprint import pprint
+    # pprint(change_dates)
+    # pprint(ftse)
     ftse_changes = ftse_data.match_stock_changes(ftse, change_dates)
     current_date = datetime.date.today().strftime("%Y-%m-%d")
     view = ftse_data.get_constituents_on(current_date, ftse.copy(), ftse_changes)
@@ -31,10 +34,10 @@ class stocks():
         cur_date = ig_data.from_ymd(ig_data.to_ymd(datetime.datetime.today()))
         while cur_date > stop_date:
             view = self.ftse_data.get_constituents_on(ig_data.to_ymd(cur_date), self.ftse.copy(), self.ftse_changes)
-            epics = ig_data.get_epics(view)
+            self.epics = ig_data.get_epics(view)
             for e, epic in self.epics.items():
                 ig_data.pull_prices(cur_date, epic)
-            cur_date-=datetime.timedelta(days=50)
+            cur_date-=datetime.timedelta(days=25)
 
     def do_clean_data(self,line):
         for e,epic in self.epics.items():

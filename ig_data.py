@@ -3,20 +3,22 @@
 import datetime
 import traceback
 
+from elasticsearch import Elasticsearch
 import sys
 from trading_ig import IGService
 import ig_config
 from pymongo import MongoClient
 import time
 
+es = Elasticsearch()
 c = MongoClient()
 ftse_db = c.ftse_db
 epics = ftse_db.epics
-ohlc_data = ftse_db.prices
 
 ig = IGService(ig_config.ig_usr, ig_config.ig_pwd, ig_config.ig_key, 'live')
 ig.create_session()
 
+datatype = 'es'
 
 def get_epics(stocks):
     r_epics = {}
@@ -25,7 +27,10 @@ def get_epics(stocks):
 
         p_epics = []
 
-        s_epic = epics.find_one({'stock': stock})
+        if datatype == "mongo":
+            s_epic = epics.find_one({'stock': stock})
+        else:
+            s_epic = get_es_epic(stock)
         if s_epic:
             r_epics[stock] = s_epic['epic']
             continue
@@ -51,7 +56,7 @@ def get_epics(stocks):
                 choice = input('--> ')
                 try:
                     choice = int(choice)
-                except:
+                except Exception as e:
                     pass
             if len(p_epics) > 0:
                 print(f"Selected {p_epics[choice]['epic']} for {stock}")
@@ -59,7 +64,10 @@ def get_epics(stocks):
                 r_epics[stock] = p_epics[choice]
         if len(p_epics) > 0 and choice > -1:
             print(f"Inserting {p_epics[choice]}")
-            epics.insert_one(p_epics[choice])
+            if datatype == "es":
+                es.index(index="epics", doc_type="epic", id=stock, body=p_epics[choice])
+            else:
+                epics.insert_one(p_epics[choice])
 
     return r_epics
 
@@ -81,25 +89,29 @@ def from_secs(secs):
     return datetime.datetime.utcfromtimestamp(secs)
 
 
-def clean_data(epic):
-    data = ohlc_data.find({'epic': epic})
-    x_data = {}
-    for line in data:
-        if line['date'] not in x_data.keys():
-            x_data[line['date']] = 0
-        x_data[line['date']] += 1
-    for date, count in x_data.items():
-        if count > 1:
-            print(f"Found {count} items on {date} for {epic}")
-            ohlc_data.remove({'epic': epic, 'date': date})
-
-
 def find_gaps(epic, date, lookback):
     gaps = {}
     date_from_date = date
     date_to_date = date_from_date - datetime.timedelta(days=lookback)
-    count = ohlc_data.find(
-        {'epic': epic, 'date': {'$lte': to_secs(date_from_date), '$gt': to_secs(date_to_date)}}).count()
+
+    q = {
+        "query": {
+            "bool": {
+                "must": [
+                    {
+                        "query_string": {
+                            "query": f"epic:/{epic}/ AND "
+                                     f"date:<={to_secs(date_from_date)*1000} AND "
+                                     f"date:>{to_secs(date_to_date)*1000}"
+                        }
+                    }
+                ]
+            }
+        }
+    }
+    res = es.count(index='stocks', doc_type='ohlc', body=q)
+    count = res["count"]
+
     print(f"Got {count} data points between {to_ymd(date_from_date)} and {to_ymd(date_to_date)} for {epic}")
     if count == lookback:
         return gaps
@@ -107,7 +119,7 @@ def find_gaps(epic, date, lookback):
     run_start = s_date
     while date_from_date > date_to_date:
         # print(f"Searching for data on {date_from_date}")
-        count = ohlc_data.find({'epic': epic, 'date': s_date}).count()
+        count = count_es_ohlc_on_date(epic, s_date * 1000)
         date_from_date -= datetime.timedelta(days=1)
         s_date = to_secs(date_from_date)
         if count == 0:
@@ -132,21 +144,81 @@ def pull_prices(date, epic):
 
 
 def get_ohlcs(epic, date, lookback):
-    ohlcs = []
     date_from_date = date
     date_to_date = date_from_date - datetime.timedelta(days=lookback)
-    date_from_secs = to_secs(date_from_date)
-    date_to_secs = to_secs(date_to_date)
-    data = ohlc_data.find({'epic': epic, 'date': {'$lte': date_to_secs, '$gt': date_from_secs}})
-    if data is None or data.count() != lookback:
-        if populate_ohlc(epic, to_ymd(date_from_date), to_ymd(date_to_date)):
-            pass
-        else:
-            return []
-    else:
-        ohlcs.append(data)
-    return ohlcs
+    date_from_ms = to_secs(date_from_date) * 1000
+    date_to_ms = to_secs(date_to_date) * 1000
+    data = es.count(index='stocks', doc_type='ohlc', body={
+        "query": {
+            "bool": {
+                "must": [
+                    {
+                        "query_string": {
+                            "query": f"epic:{epic} AND "
+                                     f"date:>{date_from_ms} AND "
+                                     f"date:<={date_to_ms}"
+                        }
+                    }
+                ]
+            }
+        }
+    })
+    from pprint import pprint
+    pprint(data)
+    return data
 
+
+def count_es_ohlc_on_date(epic, date_ms):
+    count = es.count(index='stocks', doc_type='ohlc', body={
+        "query": {
+            "bool": {
+                "must": [
+                    {
+                        "query_string": {
+                            "query": f"epic:/{epic}/ AND "
+                                     f"date:{date_ms}"
+                        }
+                    }
+                ]
+            }
+        }
+    })
+    return count['count']
+
+
+def get_es_epic(stock):
+    data = es.search(index='epics', doc_type='epic', body={
+        "query": {
+            "match_phrase": {
+                "stock":  stock
+            }
+        }
+    })
+    if data['hits']['total']>0:
+        return data['hits']['hits'][0]['_source']
+    else:
+        return None
+
+
+def add_stock_to_es(ident, data):
+    try:
+        res = es.index(index='stocks', doc_type='ohlc', id=ident, body=data)
+        print(f"Result: {res['result']}, Version: {res['_version']}")
+    except Exception as e:
+        print(f"Result: Failed to add {data} as {ident}, Version N/A")
+
+
+def migrate_epics_to_es():
+    from pprint import pprint
+    for epic in epics.find({}):
+        epic.pop("_id", None)
+#         try:
+#             res = es.delete(index='stocks', doc_type='ohlc', id=epic['stock'])
+#             pprint(res)
+#         except Exception as e:
+#             pass
+        res = es.index(index='epics', doc_type='epic', id=epic['stock'], body=epic)
+        print(f"Inserted {epic['stock']} - result: {res['result']}")
 
 def populate_ohlc(epic, date_from, date_to):
     global ig
@@ -156,7 +228,7 @@ def populate_ohlc(epic, date_from, date_to):
         prices = ig.fetch_historical_prices_by_epic_and_date_range(epic, 'D', date_to + ' 00:00:00',
                                                                    date_from + ' 01:00:00')
         ohlcs = prices['prices']
-        #print(f"{prices}")
+        # print(f"{prices}")
         allowance = prices['allowance']['remainingAllowance']
         restart = prices['allowance']['allowanceExpiry']
         reset_on = datetime.datetime.now() + datetime.timedelta(seconds=restart)
@@ -166,8 +238,10 @@ def populate_ohlc(epic, date_from, date_to):
         to_date = from_ymd(date_to)
         index = from_date.strftime('%Y:%m:%d-00:00:00')
         while from_date >= to_date:
-            secs = to_secs(from_date)
-            if ohlc_data.find({'epic': epic, 'date': secs}).count() == 0:
+            secs = to_secs(from_date) * 1000
+            ident = f"{secs}-{epic}"
+            count = count_es_ohlc_on_date(epic, secs)
+            if count == 0:
                 if index in ohlcs.index:
                     ohlc = ohlcs.loc[index]
                     print(f"Inserting price data on {from_date} ({secs})")
@@ -188,11 +262,10 @@ def populate_ohlc(epic, date_from, date_to):
                         },
                         'volume': int(ohlc[('last', 'Volume')])
                     }
-                    #print(f"{insert}")
-                    ohlc_data.insert_one(insert)
+                    # print(f"{insert}")
                 else:
                     print(f"Inserting zero data on {from_date} ({secs})")
-                    ohlc_data.insert_one({
+                    insert = {
                         'date': secs,
                         'epic': epic,
                         'bid': {
@@ -208,13 +281,14 @@ def populate_ohlc(epic, date_from, date_to):
                             'Close': 0
                         },
                         'volume': 0
-                    })
+                    }
+
+                add_stock_to_es(ident, insert)
             else:
                 print(f"Not inserting data on {from_date} ({secs})")
             from_date -= datetime.timedelta(days=1)
             index = from_date.strftime('%Y:%m:%d-00:00:00')
     except Exception as e:
-        x = e.args[0]
         if type(e) == Exception and e.args[0] == 'error.public-api.exceeded-account-allowance':
             print(e.args[0])
             time.sleep(60)
@@ -227,7 +301,7 @@ def populate_ohlc(epic, date_from, date_to):
             populate_ohlc(epic, date_to, date_to)
             return True
         elif type(e) == Exception and \
-                         e.args[0] == 'error.public-api.exceeded-account-historical-data-allowance':
+                        e.args[0] == 'error.public-api.exceeded-account-historical-data-allowance':
             print(e.args[0])
             return False
         else:
